@@ -215,3 +215,6 @@ docid: `s3_AEgATgYRAGMCNEL1NP6WGT3mlm7fN`
 2. `smartsheet_get_fields` 获取默认字段 ID
 3. `smartsheet_update_fields` 将默认字段重命名为第一个目标字段
 4. `smartsheet_add_fields` 添加剩余字段
+
+
+
