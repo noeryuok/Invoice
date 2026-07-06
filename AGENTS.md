@@ -2,12 +2,6 @@
 
 财务数据报表。
 
-## 仓库状态
-
-- **Greenfield 项目**。只有一个初始提交，尚未创建任何处理/分析代码。
-- 没有构建系统、测试框架、lint/格式化配置或 CI/CD。
-- 需要在 `data/raw/` 中处理输入数据，并生成输出。
-
 ## 数据文件
 
 所有文件均为 **UTF-8 编码的 CSV**，包含中文字段名。
@@ -32,13 +26,28 @@
 
 ## 标准工作流程
 
-由于项目处于初期阶段，工作通常涉及：
+项目工作流：
 
 1. **读取 CSV 输入：** `data/raw/*.csv`，需处理中文列名和 UTF-8 编码
-2. **处理/分析：** 尚无现有代码
-3. **写入输出：** 尚无既定输出目录
+2. **数据清洗：** 写入 `data/processed/`，日期统一 `YYYY-MM-DD`，金融列转 `float`
+3. **分析计算：** `src/pipelines/` 下纯函数，返回 `pd.DataFrame`
+4. **保存结果：** `data/summary/` 目录（`utf-8-sig` 编码），日期列先 `dt.strftime("%Y-%m-%d")`
+5. **上传企微：** `src/outputs/wecom_uploader.py` 负责 wecom-cli 交互，数据以 `list[list]` 传入
 
-如需新增数据文件（如处理后的输出），建议使用 `data/` 下按用途命名的子目录。
+如需新增数据文件，建议使用 `data/` 下按用途命名的子目录。
+
+
+7. 命名规范
+●文件: 全小写，下划线分隔，如 invoice_loader.py
+●类: 大驼峰，如 PaymentNoticeItem
+●函数: 动词开头，如 load_payment_notices()
+●常量: 全大写，如 RAWDATA_DIR = Path("/rawdata")
+8. 日志规范
+●全局禁止 print()，统一使用 loguru
+●文件日志：logs/zifa_{YYYYMMDD}.log
+●控制台日志：INFO 级别；文件日志：DEBUG 级别
+●敏感信息（完整金额、车牌）禁止在 INFO 及以上级别输出
+
 
 ---
 
@@ -68,7 +77,8 @@ INVOICE/
 ├── README.md
 ├── data/
 │   ├── raw/                    # 原始数据（序时账、行车日志）
-│   └── processed/              # 中间结果
+│   ├── processed/              # 中间结果
+│   └── summary/                # 最终摘要 CSV
 ├── src/
 │   ├── __init__.py
 │   ├── pipelines/              # 数据分析管道
@@ -94,7 +104,9 @@ INVOICE/
 
 ## 数据约定
 - 输入：`.xlsx` 或 `.csv`，放在 `data/raw/`
-- 输出：分析结果必须先转为 `list[list]`（二维数组），再传给 uploader
+- 中间结果：`data/processed/`（清洗后 CSV）
+- 分析结果：`data/summary/`（最终摘要 CSV），输出前日期列用 `dt.strftime("%Y-%m-%d")` 格式化为字符串
+- 分析结果必须先转为 `list[list]`（二维数组），再传给 uploader
 - 日期列统一用 `pd.to_datetime()` 处理，格式 `YYYY-MM-DD`
 
 ## 运行命令
@@ -110,9 +122,94 @@ uv run pytest              # 运行测试
 - 函数必须有类型注解
 - 异常必须捕获并打印中文错误信息
 
+- 日志: loguru（严禁使用 print）
 
 """
 数据分析工作流主入口
 执行流程：读取数据 → 分析计算 → 上传企微智能表格
 """
 
+---
+
+## 付款通知单数据清理规则
+
+操作目标：读取 `data/raw/付款通知单.csv`，清理后写入 `data/processed/付款通知单.csv`。
+
+### 日期列（账单日期、到期日期、开始日期、结束日期）
+- 统一输出格式：`YYYY-MM-DD`
+- 账单日期、到期日期：直接 `pd.to_datetime()` 转换
+- 开始日期、结束日期：处理不完整日期格式 ——
+  - 纯年份 `2023` → `2023-01-01`
+  - YYYYMM `202310` → `2023-10-01`
+  - M/D/YY `1/1/23` → `2023-01-01`
+  - YYYY-M `2023-1` → `2023-01-01`
+  - `0` 或空值 → `NaN`
+
+### 金融列（款项金额、总计、应收款 余额、调整）
+- `pd.to_numeric()` 转为 `float` 类型（单位：元）
+
+### 输出规范
+- 编码：`utf-8-sig`
+- 不修改 `data/raw/` 下任何文件
+
+## 客户付款数据清理规则
+
+操作目标：读取 `data/raw/客户付款.csv`，清理后写入 `data/processed/客户付款.csv`。
+### 日期列（日期）
+- 统一输出格式：`YYYY-MM-DD`
+
+### 金融列（金额(FCY)、未使用金额 (FCY)）
+- `pd.to_numeric()` 转为 `float` 类型（单位：元）
+
+### 输出规范
+- 编码：`utf-8-sig`
+- 不修改 `data/raw/` 下任何文件
+
+---
+
+## InvoiceStatus 状态映射
+原文 ｜	中文 ｜ 含义
+｜--｜-- ｜-- ｜
+Closed	｜ 已结清	｜全额付款
+Open	｜ 待处理	｜ 未处理
+Overdue	｜ 已逾期	｜ 逾期未付
+PartiallyPaid	 ｜ 部分付款	｜ 部分付款
+
+解析/processed 文件夹下的付款通知单（多行明细账单）与客户付款记录，建立账单-付款关联。（依据“账单编号”建立关联）
+
+## 应收款摘要
+
+`src/pipelines/invoice_mapper.py::build_receivables_summary()`
+
+处理流程：
+1. 按 `账单编号` 去重（groupby first）
+2. Invoice状态 映射为中文（STATUS_MAP：Closed→已结清, Open→待处理, Overdue→已逾期, PartiallyPaid→部分付款）
+3. 筛选：`客户名称` 含 `鄂A`/`鄂W` 且 `应收款余额 > 0`
+4. 筛选：`账单日期 < 今天`（过滤未来/今天的发票）
+5. 按 `客户名称` 排序
+
+保留列：
+账单编号 | Invoice状态 | 账单日期 | 客户名称 | 总计 | 应收款 余额 | 调整
+
+## 企业微信智能表格写入
+
+文档: "财务数据分析" [https://doc.weixin.qq.com/smartsheet/s3_AEgATgYRAGMCNEL1NP6WGT3mlm7fN]
+docid: `s3_AEgATgYRAGMCNEL1NP6WGT3mlm7fN`
+
+### `src/outputs/wecom_uploader.py` 约定
+- 字段定义用 `FIELD_DEFS` 列表（`title`, `field_type`）
+- 字段名（key）必须是 `field_title`（不是 field_id）
+- 批量写入上限 500 条/次
+
+### Wecom API 值类型要求（关键）
+| 字段类型 | Python 值格式 | 说明 |
+|---|---|---|
+| `FIELD_TYPE_TEXT` | `[{"type": "text", "text": str(val)}]` | 必须用数组+对象格式，不可传纯字符串 |
+| `FIELD_TYPE_NUMBER` | `float(val)` | 必须传数值，不可传字符串 |
+| `FIELD_TYPE_DATE_TIME` | `str(val)` | 传 `YYYY-MM-DD` 格式字符串 |
+
+### 子表创建流程
+1. `smartsheet_add_sheet` 创建子表（默认带一个"智能表列"字段）
+2. `smartsheet_get_fields` 获取默认字段 ID
+3. `smartsheet_update_fields` 将默认字段重命名为第一个目标字段
+4. `smartsheet_add_fields` 添加剩余字段
